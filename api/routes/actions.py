@@ -113,7 +113,7 @@ async def perform_action(email_id: int, req: ActionRequest):
 
 
 @router.post("/emails/batch-action")
-async def perform_batch_action(req: BatchActionRequest):
+async def perform_batch_action(req: BatchActionRequest, token: str = Depends(verify_token)):
     """批量操作多封邮件（线程级操作用）。"""
     if req.action not in ACTION_EVENT_MAP:
         raise HTTPException(status_code=400, detail=f"未知操作: {req.action}")
@@ -194,7 +194,7 @@ async def perform_batch_action(req: BatchActionRequest):
 
 
 @router.post("/emails/view-action")
-async def perform_view_action(req: ViewActionRequest):
+async def perform_view_action(req: ViewActionRequest, token: str = Depends(verify_token)):
     """对整个视图的所有邮件执行操作（如：browse 视图全部已阅）。"""
     allowed = {"mark_browsed": ["browse"], "mark_done": ["pending"]}
     if req.action not in allowed:
