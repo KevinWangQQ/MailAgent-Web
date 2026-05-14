@@ -46,6 +46,10 @@ export default function InboxPage() {
     const id = emailId ?? activeId;
     if (!id) return;
 
+    // 检测当前邮件是否属于线程
+    const currentEmail = activeEmail ?? emails.find((e) => e.internal_id === id);
+    const isThread = !!currentEmail?.thread_id && currentEmail.thread_count > 1;
+
     // mark_done/mark_browsed 在对应视图下：先算下一封，再发请求
     const shouldAdvance =
       (action === "mark_done" && activeView === "pending") ||
@@ -59,10 +63,22 @@ export default function InboxPage() {
     }
 
     try {
-      await apiFetch(`/emails/${id}/action`, {
-        method: "POST",
-        body: JSON.stringify({ action }),
-      });
+      if (isThread) {
+        // 线程级：先获取线程所有邮件 ID，批量操作
+        const threadEmails = await apiFetch<Array<{ internal_id: number }>>(
+          `/emails/thread/${encodeURIComponent(currentEmail.thread_id!)}`,
+        );
+        const ids = threadEmails.map((e) => e.internal_id);
+        await apiFetch("/emails/batch-action", {
+          method: "POST",
+          body: JSON.stringify({ action, email_ids: ids }),
+        });
+      } else {
+        await apiFetch(`/emails/${id}/action`, {
+          method: "POST",
+          body: JSON.stringify({ action }),
+        });
+      }
       if (shouldAdvance) setActiveId(nextId);
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
@@ -70,7 +86,7 @@ export default function InboxPage() {
     } catch {
       // silent
     }
-  }, [activeId, activeView, emails, queryClient]);
+  }, [activeId, activeView, activeEmail, emails, queryClient]);
 
   const performBatchAction = useCallback(async (action: string) => {
     if (selectedIds.size === 0) return;
