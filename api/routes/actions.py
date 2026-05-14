@@ -3,7 +3,9 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps import verify_token
-from api.models.action import ActionRequest, BatchActionRequest
+from api.models.action import ActionRequest, BatchActionRequest, ViewActionRequest
+from api.models.email import EmailFilter
+from api.services import email_service
 from api.services import redis_service
 from api.services.db import get_db, get_db_rw
 
@@ -189,3 +191,54 @@ async def perform_batch_action(req: BatchActionRequest):
         results.append(eid)
 
     return {"ok": True, "action": req.action, "processed": results}
+
+
+@router.post("/emails/view-action")
+async def perform_view_action(req: ViewActionRequest):
+    """对整个视图的所有邮件执行操作（如：browse 视图全部已阅）。"""
+    allowed = {"mark_browsed": ["browse"], "mark_done": ["pending"]}
+    if req.action not in allowed:
+        raise HTTPException(status_code=400, detail=f"视图操作不支持: {req.action}")
+    if req.view not in allowed[req.action]:
+        raise HTTPException(status_code=400, detail=f"{req.action} 不能用于 {req.view} 视图")
+
+    # 复用 list_emails 拉全量（page_size 大到覆盖全部）
+    items, total = email_service.list_emails(
+        EmailFilter(view=req.view), page=1, page_size=5000,
+    )
+    if not items:
+        return {"ok": True, "action": req.action, "count": 0}
+
+    now = time.time()
+    with get_db_rw() as conn:
+        ids = [item.internal_id for item in items]
+        placeholders = ",".join("?" * len(ids))
+
+        if req.action == "mark_browsed":
+            conn.execute(
+                f"UPDATE email_metadata SET processing_status = '已浏览', updated_at = ? WHERE internal_id IN ({placeholders})",
+                [now] + ids,
+            )
+        elif req.action == "mark_done":
+            conn.execute(
+                f"UPDATE email_metadata SET is_flagged = 0, is_read = 1, processing_status = '已完成', web_action_at = ?, updated_at = ? WHERE internal_id IN ({placeholders})",
+                [now, now] + ids,
+            )
+
+    # mark_done 需要逐个推 Redis 事件（Mail.app 同步）
+    if req.action == "mark_done":
+        for eid in ids:
+            meta = _get_email_meta(eid)
+            if meta:
+                await redis_service.push_event({
+                    "type": "completed",
+                    "internal_id": eid,
+                    "page_id": meta.get("notion_page_id", ""),
+                    "source": "web",
+                    "properties": {
+                        "message_id": meta.get("message_id", ""),
+                        "mailbox": meta.get("mailbox", ""),
+                    },
+                })
+
+    return {"ok": True, "action": req.action, "count": len(ids)}

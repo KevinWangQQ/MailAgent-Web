@@ -22,9 +22,10 @@ interface Props {
   viewCounts?: ViewCounts;
   searchOpen?: boolean;
   onSearchToggle?: (open: boolean) => void;
+  onViewAction?: (action: string, view: string) => void;
 }
 
-export function FilterBar({ filter, onFilterChange, viewCounts, searchOpen: externalSearchOpen, onSearchToggle }: Props) {
+export function FilterBar({ filter, onFilterChange, viewCounts, searchOpen: externalSearchOpen, onSearchToggle, onViewAction }: Props) {
   const [internalSearchOpen, setInternalSearchOpen] = useState(false);
   const searchOpen = externalSearchOpen ?? internalSearchOpen;
   const setSearchOpen = onSearchToggle ?? setInternalSearchOpen;
@@ -105,10 +106,28 @@ export function FilterBar({ filter, onFilterChange, viewCounts, searchOpen: exte
             </button>
           );
         })}
+        {/* 视图级快捷操作 */}
+        {activeView === "browse" && onViewAction && (
+          <button
+            onClick={() => onViewAction("mark_browsed", "browse")}
+            className="px-2 py-0.5 rounded text-[10px] font-medium bg-status-success/15 text-status-success hover:bg-status-success/25 transition-colors ml-auto"
+          >
+            全部已阅
+          </button>
+        )}
+        {activeView === "pending" && onViewAction && (
+          <button
+            onClick={() => onViewAction("mark_done", "pending")}
+            className="px-2 py-0.5 rounded text-[10px] font-medium bg-status-success/15 text-status-success hover:bg-status-success/25 transition-colors ml-auto"
+          >
+            全部完成
+          </button>
+        )}
         <button
           onClick={() => setSearchOpen(!searchOpen)}
           className={clsx(
-            "px-2 py-0.5 rounded text-[11px] border transition-colors ml-auto",
+            "px-2 py-0.5 rounded text-[11px] border transition-colors",
+            activeView !== "browse" && activeView !== "pending" && "ml-auto",
             searchOpen || filter.search
               ? "border-accent bg-accent-dim text-accent"
               : "border-border text-fg-muted hover:border-accent hover:text-accent"

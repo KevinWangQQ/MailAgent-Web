@@ -123,6 +123,25 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_view_summary",
+        "description": (
+            "获取指定视图（pending/browse/ignore/all）的邮件统计摘要。"
+            "返回总数、按类别/发件人/优先级的分布、以及完整邮件列表（最多 200 封，含 subject/sender/date/priority/category）。"
+            "适合用户想快速了解某个视图全貌、或决定是否批量处理。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view": {
+                    "type": "string",
+                    "description": "视图名称: pending, browse, ignore, all",
+                    "enum": ["pending", "browse", "ignore", "all"],
+                },
+            },
+            "required": ["view"],
+        },
+    },
+    {
         "name": "get_email_ai_labels",
         "description": (
             "获取邮件的 AI 分析结果。返回 AI 生成的分类、优先级、摘要、操作类型等标签。"
@@ -158,6 +177,8 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> str:
             return _get_sender_stats(tool_input)
         if tool_name == "search_by_date":
             return _search_by_date(tool_input)
+        if tool_name == "get_view_summary":
+            return _get_view_summary(tool_input)
         if tool_name == "get_email_ai_labels":
             return _get_email_ai_labels(tool_input)
         return json.dumps({"error": f"unknown tool: {tool_name}"})
@@ -381,6 +402,55 @@ def _search_by_date(inp: dict[str, Any]) -> str:
 
     return json.dumps(
         {"count": len(rows), "emails": [_row_to_email(r) for r in rows]},
+        ensure_ascii=False,
+    )
+
+
+def _get_view_summary(inp: dict[str, Any]) -> str:
+    from api.models.email import EmailFilter
+    from api.services import email_service
+
+    view = inp.get("view", "browse")
+    items, total = email_service.list_emails(
+        EmailFilter(view=view), page=1, page_size=200,
+    )
+
+    # 统计分布
+    by_category: dict[str, int] = {}
+    by_sender: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    email_list = []
+
+    for item in items:
+        cat = item.category or "未分类"
+        by_category[cat] = by_category.get(cat, 0) + 1
+        sender = item.sender_name or item.sender or "未知"
+        by_sender[sender] = by_sender.get(sender, 0) + 1
+        pri = item.priority or "未标注"
+        by_priority[pri] = by_priority.get(pri, 0) + 1
+        email_list.append({
+            "internal_id": item.internal_id,
+            "subject": item.subject or "",
+            "sender": f"{item.sender_name or ''} <{item.sender or ''}>".strip(),
+            "date": item.date_received or "",
+            "priority": item.priority or "",
+            "category": item.category or "",
+            "action_type": item.action_type or "",
+        })
+
+    # sender 排序，只保留 top 15
+    top_senders = sorted(by_sender.items(), key=lambda x: -x[1])[:15]
+
+    return json.dumps(
+        {
+            "view": view,
+            "total": total,
+            "showing": len(items),
+            "by_category": dict(sorted(by_category.items(), key=lambda x: -x[1])),
+            "by_priority": dict(sorted(by_priority.items(), key=lambda x: -x[1])),
+            "top_senders": dict(top_senders),
+            "emails": email_list,
+        },
         ensure_ascii=False,
     )
 

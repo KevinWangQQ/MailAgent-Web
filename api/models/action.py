@@ -9,3 +9,8 @@ class ActionRequest(BaseModel):
 class BatchActionRequest(BaseModel):
     action: str
     email_ids: list[int]
+
+
+class ViewActionRequest(BaseModel):
+    action: str  # mark_browsed, mark_done
+    view: str    # browse, pending, ignore

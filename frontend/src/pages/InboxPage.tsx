@@ -160,6 +160,24 @@ export default function InboxPage() {
     setSelectMode(false);
   }, [selectedIds, groups, queryClient]);
 
+  const handleViewAction = useCallback(async (action: string, view: string) => {
+    const count = viewCounts?.[view as keyof typeof viewCounts] ?? 0;
+    if (count === 0) return;
+    if (!confirm(`确定对"${view === "browse" ? "值得浏览" : "待处理"}"视图的 ${count} 封邮件执行此操作？`)) return;
+
+    try {
+      await apiFetch("/emails/view-action", {
+        method: "POST",
+        body: JSON.stringify({ action, view }),
+      });
+      setActiveId(null);
+      queryClient.invalidateQueries({ queryKey: ["emails"] });
+      queryClient.invalidateQueries({ queryKey: ["view-counts"] });
+    } catch {
+      // silent
+    }
+  }, [viewCounts, queryClient]);
+
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -231,6 +249,7 @@ export default function InboxPage() {
           viewCounts={viewCounts}
           searchOpen={searchOpen}
           onSearchToggle={setSearchOpen}
+          onViewAction={handleViewAction}
         />
 
         {/* 批量操作栏 */}

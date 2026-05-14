@@ -41,6 +41,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_sender_stats: "发件人统计",
   search_by_date: "日期搜索",
   get_email_ai_labels: "AI 标签",
+  get_view_summary: "视图概览",
 };
 
 export function AgentPanel({
