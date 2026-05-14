@@ -1,6 +1,7 @@
 """MailAgent Web 工作台 — FastAPI 入口。
 
 启动: uvicorn api.main:app --port 8200
+PM2:  pm2 start ecosystem.config.js
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from api.agent.session import session_manager
 from api.config import web_config
 from api.routes import api_router
 from api.services.db import ensure_web_columns
@@ -33,7 +35,9 @@ async def lifespan(app: FastAPI):
         f"db={web_config.sync_store_db_path}"
     )
     ensure_web_columns()
+    session_manager.start_cleanup()
     yield
+    await session_manager.stop_cleanup()
     await close_redis()
     logger.info("[web-api] 关闭")
 
@@ -53,7 +57,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
+# Health（在 StaticFiles 之前注册）
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "port": web_config.web_api_port}
