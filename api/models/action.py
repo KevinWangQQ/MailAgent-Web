@@ -13,4 +13,4 @@ class BatchActionRequest(BaseModel):
 
 class ViewActionRequest(BaseModel):
     action: str  # mark_browsed, mark_done
-    view: str    # browse, pending, ignore
+    view: str    # browse, pending

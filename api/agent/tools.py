@@ -23,7 +23,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "search_emails",
         "description": (
             "搜索邮件。按关键词匹配主题、发件人、AI 摘要、分类。"
-            "可限定在特定视图内搜索（pending/browse/ignore/all）。"
+            "可限定在特定视图内搜索（pending/browse/all）。"
             "返回匹配邮件列表（internal_id, subject, sender, date, mailbox, ai_summary, priority, category）。"
         ),
         "input_schema": {
@@ -35,8 +35,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
                 "view": {
                     "type": "string",
-                    "description": "限定搜索范围到指定视图（可选）: pending, browse, ignore, all",
-                    "enum": ["pending", "browse", "ignore", "all"],
+                    "description": "限定搜索范围到指定视图（可选）: pending, browse, all",
+                    "enum": ["pending", "browse", "all"],
                 },
                 "limit": {
                     "type": "integer",
@@ -131,7 +131,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "get_view_summary",
         "description": (
-            "获取指定视图（pending/browse/ignore/all）的邮件统计摘要。"
+            "获取指定视图（pending/browse/all）的邮件统计摘要。"
             "返回总数、按类别/发件人/优先级的分布、以及完整邮件列表（最多 200 封，含 subject/sender/date/priority/category）。"
             "适合用户想快速了解某个视图全貌、或决定是否批量处理。"
         ),
@@ -140,8 +140,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "view": {
                     "type": "string",
-                    "description": "视图名称: pending, browse, ignore, all",
-                    "enum": ["pending", "browse", "ignore", "all"],
+                    "description": "视图名称: pending, browse, all",
+                    "enum": ["pending", "browse", "all"],
                 },
             },
             "required": ["view"],

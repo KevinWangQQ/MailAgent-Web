@@ -50,10 +50,6 @@ Mail.app → SQLite 雷达检测 → AppleScript 获取内容 → Notion 同步
 - 含义：不紧急但值得看一眼的邮件（如系统通知、技术讨论）
 - 可用操作：**mark_browsed** → 设置 `processing_status='已浏览'`，邮件从 browse 消失（纯本地操作，不影响 Mail.app）
 
-### ignore（可忽略）
-- 条件：`is_flagged=0` + LLM 已处理 + `priority='⚪ 低'`
-- 含义：低优先级，通常可忽略
-
 ### all（全部）
 - 所有已同步邮件，不过滤
 
