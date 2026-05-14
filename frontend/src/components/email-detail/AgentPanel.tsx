@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { clsx } from "clsx";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Props {
   emailId: number | null;
@@ -381,10 +383,10 @@ export function AgentPanel({
                 ))}
                 {/* 文本内容 */}
                 {msg.content && (
-                  <div className="bg-bg-secondary border border-border rounded-lg px-3 py-2">
-                    <pre className="text-[13px] text-fg-secondary whitespace-pre-wrap font-sans leading-relaxed">
+                  <div className="bg-bg-secondary border border-border rounded-lg px-3 py-2 prose-agent">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
                       {msg.content}
-                    </pre>
+                    </ReactMarkdown>
                   </div>
                 )}
               </div>
