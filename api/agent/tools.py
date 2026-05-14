@@ -1,6 +1,6 @@
 """Agent 工具定义 + 本地执行器。
 
-6 个工具，全部走本地 SQLite 查询（read_email_body 除外，走 Notion API）。
+8 个工具：7 个只读查询 + 1 个写操作（batch_action）。
 """
 
 from __future__ import annotations
@@ -22,20 +22,26 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "search_emails",
         "description": (
-            "搜索邮件。按关键词匹配主题、发件人、AI 摘要。"
-            "返回匹配邮件列表（internal_id, subject, sender, date, mailbox, ai_summary, priority）。"
+            "搜索邮件。按关键词匹配主题、发件人、AI 摘要、分类。"
+            "可限定在特定视图内搜索（pending/browse/all）。"
+            "返回匹配邮件列表（internal_id, subject, sender, date, mailbox, ai_summary, priority, category）。"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "搜索关键词",
+                    "description": "搜索关键词（匹配主题、发件人、AI 摘要、分类）",
+                },
+                "view": {
+                    "type": "string",
+                    "description": "限定搜索范围到指定视图（可选）: pending, browse, all",
+                    "enum": ["pending", "browse", "all"],
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "最大返回数量，默认 10",
-                    "default": 10,
+                    "description": "最大返回数量，默认 20",
+                    "default": 20,
                 },
             },
             "required": ["query"],
@@ -123,6 +129,25 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_view_summary",
+        "description": (
+            "获取指定视图（pending/browse/all）的邮件统计摘要。"
+            "返回总数、按类别/发件人/优先级的分布、以及完整邮件列表（最多 200 封，含 subject/sender/date/priority/category）。"
+            "适合用户想快速了解某个视图全貌、或决定是否批量处理。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "view": {
+                    "type": "string",
+                    "description": "视图名称: pending, browse, all",
+                    "enum": ["pending", "browse", "all"],
+                },
+            },
+            "required": ["view"],
+        },
+    },
+    {
         "name": "get_email_ai_labels",
         "description": (
             "获取邮件的 AI 分析结果。返回 AI 生成的分类、优先级、摘要、操作类型等标签。"
@@ -136,6 +161,34 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
             },
             "required": ["internal_id"],
+        },
+    },
+    {
+        "name": "batch_action",
+        "description": (
+            "对多封邮件执行批量操作。支持的操作: mark_done（标记已完成）、mark_browsed（标记已阅）、toggle_flag（切换旗标）、toggle_read（切换已读）。"
+            "可以传入 email_ids 列表直接操作，也可以传 view 对整个视图批量操作（view 模式下 mark_browsed 用于 browse 视图，mark_done 用于 pending 视图）。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "操作类型: mark_done, mark_browsed, toggle_flag, toggle_read",
+                    "enum": ["mark_done", "mark_browsed", "toggle_flag", "toggle_read"],
+                },
+                "email_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "要操作的邮件 internal_id 列表（与 view 二选一）",
+                },
+                "view": {
+                    "type": "string",
+                    "description": "对整个视图批量操作（与 email_ids 二选一）: pending, browse",
+                    "enum": ["pending", "browse"],
+                },
+            },
+            "required": ["action"],
         },
     },
 ]
@@ -158,8 +211,12 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> str:
             return _get_sender_stats(tool_input)
         if tool_name == "search_by_date":
             return _search_by_date(tool_input)
+        if tool_name == "get_view_summary":
+            return _get_view_summary(tool_input)
         if tool_name == "get_email_ai_labels":
             return _get_email_ai_labels(tool_input)
+        if tool_name == "batch_action":
+            return await _batch_action(tool_input)
         return json.dumps({"error": f"unknown tool: {tool_name}"})
     except Exception as e:
         logger.warning(f"[agent-tool] {tool_name} failed: {e!r}")
@@ -172,10 +229,50 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> str:
 
 def _search_emails(inp: dict[str, Any]) -> str:
     query = inp.get("query", "").strip()
-    limit = min(inp.get("limit", 10), 30)
+    view = inp.get("view", "").strip()
+    limit = min(inp.get("limit", 20), 50)
     if not query:
         return json.dumps({"emails": [], "note": "empty query"})
 
+    # 有 view 参数时：通过 email_service 获取视图内邮件，再做关键词过滤
+    if view and view != "all":
+        from api.models.email import EmailFilter
+        from api.services import email_service
+
+        items, total = email_service.list_emails(
+            EmailFilter(view=view), page=1, page_size=500,
+        )
+        q_lower = query.lower()
+        matched = []
+        for item in items:
+            searchable = " ".join([
+                item.subject or "",
+                item.sender or "",
+                item.sender_name or "",
+                item.ai_summary or "",
+                item.category or "",
+                item.action_type or "",
+            ]).lower()
+            if q_lower in searchable:
+                matched.append({
+                    "internal_id": item.internal_id,
+                    "subject": item.subject or "",
+                    "sender": f"{item.sender_name or ''} <{item.sender or ''}>".strip(),
+                    "date": item.date_received or "",
+                    "mailbox": item.mailbox or "",
+                    "priority": item.priority or "",
+                    "category": item.category or "",
+                    "action_type": item.action_type or "",
+                    "ai_summary": item.ai_summary or "",
+                })
+                if len(matched) >= limit:
+                    break
+        return json.dumps(
+            {"count": len(matched), "view": view, "emails": matched},
+            ensure_ascii=False,
+        )
+
+    # 无 view：全局 SQL LIKE 搜索
     pattern = f"%{query}%"
     with get_db() as conn:
         rows = conn.execute(
@@ -385,6 +482,55 @@ def _search_by_date(inp: dict[str, Any]) -> str:
     )
 
 
+def _get_view_summary(inp: dict[str, Any]) -> str:
+    from api.models.email import EmailFilter
+    from api.services import email_service
+
+    view = inp.get("view", "browse")
+    items, total = email_service.list_emails(
+        EmailFilter(view=view), page=1, page_size=200,
+    )
+
+    # 统计分布
+    by_category: dict[str, int] = {}
+    by_sender: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    email_list = []
+
+    for item in items:
+        cat = item.category or "未分类"
+        by_category[cat] = by_category.get(cat, 0) + 1
+        sender = item.sender_name or item.sender or "未知"
+        by_sender[sender] = by_sender.get(sender, 0) + 1
+        pri = item.priority or "未标注"
+        by_priority[pri] = by_priority.get(pri, 0) + 1
+        email_list.append({
+            "internal_id": item.internal_id,
+            "subject": item.subject or "",
+            "sender": f"{item.sender_name or ''} <{item.sender or ''}>".strip(),
+            "date": item.date_received or "",
+            "priority": item.priority or "",
+            "category": item.category or "",
+            "action_type": item.action_type or "",
+        })
+
+    # sender 排序，只保留 top 15
+    top_senders = sorted(by_sender.items(), key=lambda x: -x[1])[:15]
+
+    return json.dumps(
+        {
+            "view": view,
+            "total": total,
+            "showing": len(items),
+            "by_category": dict(sorted(by_category.items(), key=lambda x: -x[1])),
+            "by_priority": dict(sorted(by_priority.items(), key=lambda x: -x[1])),
+            "top_senders": dict(top_senders),
+            "emails": email_list,
+        },
+        ensure_ascii=False,
+    )
+
+
 def _get_email_ai_labels(inp: dict[str, Any]) -> str:
     internal_id = inp.get("internal_id")
     if not internal_id:
@@ -393,7 +539,7 @@ def _get_email_ai_labels(inp: dict[str, Any]) -> str:
     with get_db() as conn:
         row = conn.execute(
             """
-            SELECT l.labels_json, l.status, l.model_used,
+            SELECT l.labels_json, l.status, l.model,
                    e.subject, e.sender, e.date_received
             FROM llm_processing l
             JOIN email_metadata e ON l.internal_id = e.internal_id
@@ -418,11 +564,53 @@ def _get_email_ai_labels(inp: dict[str, Any]) -> str:
             "sender": row["sender"] or "",
             "date": row["date_received"] or "",
             "llm_status": row["status"] or "",
-            "model": row["model_used"] or "",
+            "model": row["model"] or "",
             "labels": labels,
         },
         ensure_ascii=False,
     )
+
+
+async def _batch_action(inp: dict[str, Any]) -> str:
+    """调用内部 action 接口执行批量操作。"""
+    import httpx
+
+    action = inp.get("action", "")
+    email_ids = inp.get("email_ids")
+    view = inp.get("view")
+
+    if not action:
+        return json.dumps({"error": "missing action"})
+
+    port = web_config.web_api_port
+    base = f"http://127.0.0.1:{port}/api"
+    token = web_config.web_api_token
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        if view:
+            resp = await client.post(
+                f"{base}/emails/view-action",
+                headers=headers,
+                json={"action": action, "view": view},
+            )
+        elif email_ids:
+            if len(email_ids) > 200:
+                email_ids = email_ids[:200]
+            resp = await client.post(
+                f"{base}/emails/batch-action",
+                headers=headers,
+                json={"action": action, "email_ids": email_ids},
+            )
+        else:
+            return json.dumps({"error": "需要提供 email_ids 或 view 参数"})
+
+        if resp.status_code != 200:
+            return json.dumps({"error": f"API {resp.status_code}: {resp.text[:200]}"})
+
+        return resp.text
 
 
 # ---------------------------------------------------------------------------

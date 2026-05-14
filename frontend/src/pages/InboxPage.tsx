@@ -1,5 +1,5 @@
-import { useState, useCallback, useMemo } from "react";
-import type { EmailFilter, EmailView } from "@/lib/types";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import type { EmailFilter, EmailListItem, EmailView } from "@/lib/types";
 import { useEmails } from "@/hooks/useEmails";
 import { useEmailBody } from "@/hooks/useEmailBody";
 import { useEmailDetail } from "@/hooks/useEmailDetail";
@@ -13,6 +13,84 @@ import { HelpPanel } from "@/components/layout/HelpPanel";
 import { useSearchParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
+
+/* ── 三列可拖拽布局常量 ── */
+const COL_MIN = { list: 280, detail: 300, ai: 260 };
+const COL_DEFAULT_PCT = { list: 0.25, detail: 0.45, ai: 0.30 };
+
+export interface ThreadGroup {
+  representative: EmailListItem;
+  threadId: string | null;
+  count: number;
+  /** 同线程内所有邮件（仅当前页内的） */
+  members: EmailListItem[];
+}
+
+/** 按 thread_id 分组，同线程只保留最新一封作为代表 */
+function buildGroups(emails: EmailListItem[]): ThreadGroup[] {
+  const seen = new Map<string, ThreadGroup>();
+  const result: ThreadGroup[] = [];
+
+  for (const email of emails) {
+    const tid = email.thread_id;
+    if (!tid || email.thread_count <= 1) {
+      result.push({ representative: email, threadId: null, count: 1, members: [email] });
+      continue;
+    }
+    const existing = seen.get(tid);
+    if (existing) {
+      existing.members.push(email);
+      continue;
+    }
+    const group: ThreadGroup = {
+      representative: email,
+      threadId: tid,
+      count: email.thread_count,
+      members: [email],
+    };
+    seen.set(tid, group);
+    result.push(group);
+  }
+  return result;
+}
+
+/** 拖拽分隔条 */
+function DragHandle({ onDrag, side }: { onDrag: (dx: number) => void; side: "left" | "right" }) {
+  const dragging = useRef(false);
+  const lastX = useRef(0);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    lastX.current = e.clientX;
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current) return;
+      const dx = ev.clientX - lastX.current;
+      lastX.current = ev.clientX;
+      onDrag(dx);
+    };
+    const onUp = () => {
+      dragging.current = false;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [onDrag]);
+
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      className={`w-1 flex-shrink-0 cursor-col-resize group relative hover:bg-accent/30 active:bg-accent/50 transition-colors ${side === "left" ? "border-r border-border" : "border-l border-border"}`}
+    >
+      <div className="absolute inset-y-0 -left-1 -right-1" />
+    </div>
+  );
+}
 
 export default function InboxPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -28,7 +106,46 @@ export default function InboxPage() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [aiOpen, setAiOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(true);
+
+  /* ── 三列宽度状态 ── */
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [colWidths, setColWidths] = useState<{ list: number; detail: number; ai: number } | null>(null);
+
+  // 初始化 & 窗口 resize 时按比例重算
+  useEffect(() => {
+    function calc() {
+      const w = containerRef.current?.offsetWidth;
+      if (!w) return;
+      const list = Math.max(COL_MIN.list, Math.round(w * COL_DEFAULT_PCT.list));
+      const ai = aiOpen ? Math.max(COL_MIN.ai, Math.round(w * COL_DEFAULT_PCT.ai)) : 0;
+      const detail = Math.max(COL_MIN.detail, w - list - ai - (aiOpen ? 2 : 1)); // 减去 handle 宽度
+      setColWidths({ list, detail, ai });
+    }
+    calc();
+    window.addEventListener("resize", calc);
+    return () => window.removeEventListener("resize", calc);
+  }, [aiOpen]);
+
+  const handleDragLeft = useCallback((dx: number) => {
+    setColWidths((prev) => {
+      if (!prev) return prev;
+      const newList = Math.max(COL_MIN.list, prev.list + dx);
+      const newDetail = prev.detail - (newList - prev.list);
+      if (newDetail < COL_MIN.detail) return prev;
+      return { ...prev, list: newList, detail: newDetail };
+    });
+  }, []);
+
+  const handleDragRight = useCallback((dx: number) => {
+    setColWidths((prev) => {
+      if (!prev) return prev;
+      const newDetail = prev.detail + dx;
+      const newAi = prev.ai - dx;
+      if (newDetail < COL_MIN.detail || newAi < COL_MIN.ai) return prev;
+      return { ...prev, detail: newDetail, ai: newAi };
+    });
+  }, []);
 
   const queryClient = useQueryClient();
   const { data, isLoading } = useEmails(filter, page, 50);
@@ -36,33 +153,58 @@ export default function InboxPage() {
   const emails = data?.items ?? [];
   const total = data?.total ?? 0;
 
-  // AI 侧边栏需要当前邮件的 body 和 subject
   const { data: activeEmail } = useEmailDetail(activeId);
   const { data: bodyData } = useEmailBody(activeId);
 
   const activeView = filter.view ?? "pending";
 
+  // 线程分组 — 导航、advance、多选都基于 groups
+  const groups = useMemo(() => buildGroups(emails), [emails]);
+
+  // 当前 activeId 所在 group 的 index
+  const activeGroupIndex = useMemo(() => {
+    if (activeId === null) return -1;
+    return groups.findIndex(
+      (g) => g.representative.internal_id === activeId || g.members.some((m) => m.internal_id === activeId),
+    );
+  }, [groups, activeId]);
+
   const performAction = useCallback(async (action: string, emailId?: number) => {
     const id = emailId ?? activeId;
     if (!id) return;
 
-    // mark_done/mark_browsed 在对应视图下：先算下一封，再发请求
+    const currentEmail = activeEmail ?? emails.find((e) => e.internal_id === id);
+    const isThread = !!currentEmail?.thread_id && currentEmail.thread_count > 1;
+
+    // advance 基于 groups（线程级）
     const shouldAdvance =
       (action === "mark_done" && activeView === "pending") ||
       (action === "mark_browsed" && activeView === "browse");
     let nextId: number | null = null;
     if (shouldAdvance) {
-      const idx = emails.findIndex((e) => e.internal_id === id);
-      if (idx >= 0) {
-        nextId = emails[idx + 1]?.internal_id ?? emails[idx - 1]?.internal_id ?? null;
+      const gIdx = activeGroupIndex;
+      if (gIdx >= 0) {
+        const nextGroup = groups[gIdx + 1] ?? groups[gIdx - 1];
+        nextId = nextGroup?.representative.internal_id ?? null;
       }
     }
 
     try {
-      await apiFetch(`/emails/${id}/action`, {
-        method: "POST",
-        body: JSON.stringify({ action }),
-      });
+      if (isThread) {
+        const threadEmails = await apiFetch<Array<{ internal_id: number }>>(
+          `/emails/thread/${encodeURIComponent(currentEmail.thread_id!)}`,
+        );
+        const ids = threadEmails.map((e) => e.internal_id);
+        await apiFetch("/emails/batch-action", {
+          method: "POST",
+          body: JSON.stringify({ action, email_ids: ids }),
+        });
+      } else {
+        await apiFetch(`/emails/${id}/action`, {
+          method: "POST",
+          body: JSON.stringify({ action }),
+        });
+      }
       if (shouldAdvance) setActiveId(nextId);
       queryClient.invalidateQueries({ queryKey: ["emails"] });
       queryClient.invalidateQueries({ queryKey: ["email-detail", id] });
@@ -70,22 +212,34 @@ export default function InboxPage() {
     } catch {
       // silent
     }
-  }, [activeId, activeView, emails, queryClient]);
+  }, [activeId, activeView, activeEmail, activeGroupIndex, groups, emails, queryClient]);
 
   const performBatchAction = useCallback(async (action: string) => {
     if (selectedIds.size === 0) return;
-    const promises = Array.from(selectedIds).map((id) =>
-      apiFetch(`/emails/${id}/action`, {
-        method: "POST",
-        body: JSON.stringify({ action }),
-      }).catch(() => {})
-    );
-    await Promise.all(promises);
+
+    // 展开线程成员：选中的 ID 如果是线程代表，把同线程所有成员都加上
+    const allIds = new Set<number>();
+    for (const id of selectedIds) {
+      const group = groups.find(
+        (g) => g.representative.internal_id === id || g.members.some((m) => m.internal_id === id),
+      );
+      if (group && group.threadId) {
+        for (const m of group.members) allIds.add(m.internal_id);
+      } else {
+        allIds.add(id);
+      }
+    }
+
+    await apiFetch("/emails/batch-action", {
+      method: "POST",
+      body: JSON.stringify({ action, email_ids: Array.from(allIds) }),
+    }).catch(() => {});
+
     queryClient.invalidateQueries({ queryKey: ["emails"] });
     queryClient.invalidateQueries({ queryKey: ["view-counts"] });
     setSelectedIds(new Set());
     setSelectMode(false);
-  }, [selectedIds, queryClient]);
+  }, [selectedIds, groups, queryClient]);
 
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
@@ -96,16 +250,16 @@ export default function InboxPage() {
     });
   }, []);
 
+  // j/k 基于 groups 导航
   const handlers = useMemo(() => {
-    const currentIndex = emails.findIndex((e) => e.internal_id === activeId);
     return {
       j: () => {
-        const next = currentIndex < emails.length - 1 ? currentIndex + 1 : currentIndex;
-        if (emails[next]) setActiveId(emails[next].internal_id);
+        const next = activeGroupIndex < groups.length - 1 ? activeGroupIndex + 1 : activeGroupIndex;
+        if (groups[next]) setActiveId(groups[next].representative.internal_id);
       },
       k: () => {
-        const prev = currentIndex > 0 ? currentIndex - 1 : 0;
-        if (emails[prev]) setActiveId(emails[prev].internal_id);
+        const prev = activeGroupIndex > 0 ? activeGroupIndex - 1 : 0;
+        if (groups[prev]) setActiveId(groups[prev].representative.internal_id);
       },
       e: () => performAction(activeView === "browse" ? "mark_browsed" : "mark_done"),
       s: () => performAction("toggle_flag"),
@@ -126,7 +280,7 @@ export default function InboxPage() {
         setActiveId(null);
       },
     };
-  }, [emails, activeId, activeView, performAction, showHelp, selectMode, searchOpen, aiOpen]);
+  }, [groups, activeGroupIndex, activeView, performAction, showHelp, selectMode, searchOpen, aiOpen]);
 
   useKeyboard(handlers);
 
@@ -149,9 +303,12 @@ export default function InboxPage() {
   }, [setSearchParams]);
 
   return (
-    <div className="flex-1 flex overflow-hidden relative">
+    <div ref={containerRef} className="flex-1 flex overflow-hidden relative">
       {/* 左侧列表 */}
-      <div className="w-[380px] flex flex-col border-r border-border flex-shrink-0">
+      <div
+        className="flex flex-col flex-shrink-0"
+        style={{ width: colWidths?.list ?? 380 }}
+      >
         <FilterBar
           filter={filter}
           onFilterChange={handleFilterChange}
@@ -199,6 +356,7 @@ export default function InboxPage() {
         ) : (
           <EmailList
             emails={emails}
+            groups={groups}
             activeId={activeId}
             onSelect={handleSelect}
             selectMode={selectMode}
@@ -227,17 +385,25 @@ export default function InboxPage() {
         )}
       </div>
 
+      {/* 左分隔条 */}
+      <DragHandle onDrag={handleDragLeft} side="left" />
+
       {/* 中间详情 */}
-      {activeId ? (
-        <DetailPanel emailId={activeId} view={activeView} />
-      ) : (
-        <div className="flex-1 flex flex-col items-center justify-center text-fg-faint text-sm gap-1">
-          <span>选择一封邮件查看详情</span>
-          <span className="text-[11px] text-fg-faint">
-            快捷键: J/K 导航, E {activeView === "browse" ? "已阅" : "完成"}, S 旗标, I 打开AI, ? 帮助
-          </span>
-        </div>
-      )}
+      <div
+        className="flex flex-col min-w-0"
+        style={{ width: colWidths?.detail ?? "auto", flexGrow: colWidths ? 0 : 1 }}
+      >
+        {activeId ? (
+          <DetailPanel emailId={activeId} view={activeView} />
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center text-fg-faint text-sm gap-1">
+            <span>选择一封邮件查看详情</span>
+            <span className="text-[11px] text-fg-faint">
+              快捷键: J/K 导航, E {activeView === "browse" ? "已阅" : "完成"}, S 旗标, I 打开AI, ? 帮助
+            </span>
+          </div>
+        )}
+      </div>
 
       {/* AI 侧边栏切换按钮（收起状态） */}
       {!aiOpen && (
@@ -250,9 +416,15 @@ export default function InboxPage() {
         </button>
       )}
 
+      {/* 右分隔条 */}
+      {aiOpen && <DragHandle onDrag={handleDragRight} side="right" />}
+
       {/* AI 右侧边栏 */}
       {aiOpen && (
-        <div className="w-[360px] flex-shrink-0 border-l border-border">
+        <div
+          className="flex-shrink-0"
+          style={{ width: colWidths?.ai ?? 360 }}
+        >
           <AgentPanel
             emailId={activeId}
             body={bodyData?.body ?? null}

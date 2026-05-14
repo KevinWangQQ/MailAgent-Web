@@ -3,7 +3,9 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps import verify_token
-from api.models.action import ActionRequest
+from api.models.action import ActionRequest, BatchActionRequest, ViewActionRequest
+from api.models.email import EmailFilter
+from api.services import email_service
 from api.services import redis_service
 from api.services.db import get_db, get_db_rw
 
@@ -108,3 +110,135 @@ async def perform_action(email_id: int, req: ActionRequest):
         })
 
     return {"ok": True, "action": req.action, "email_id": email_id}
+
+
+@router.post("/emails/batch-action")
+async def perform_batch_action(req: BatchActionRequest):
+    """批量操作多封邮件（线程级操作用）。"""
+    if req.action not in ACTION_EVENT_MAP:
+        raise HTTPException(status_code=400, detail=f"未知操作: {req.action}")
+    if not req.email_ids:
+        raise HTTPException(status_code=400, detail="email_ids 不能为空")
+    if len(req.email_ids) > 100:
+        raise HTTPException(status_code=400, detail="单次最多 100 封")
+
+    results = []
+    for eid in req.email_ids:
+        meta = _get_email_meta(eid)
+        if not meta:
+            continue
+
+        mailbox = meta.get("mailbox", "")
+        message_id = meta.get("message_id", "")
+        page_id = meta.get("notion_page_id", "")
+        now = time.time()
+
+        with get_db_rw() as conn:
+            if req.action == "mark_done":
+                conn.execute(
+                    "UPDATE email_metadata SET is_flagged = 0, is_read = 1, processing_status = '已完成', web_action_at = ?, updated_at = ? WHERE internal_id = ?",
+                    (now, now, eid),
+                )
+            elif req.action == "mark_browsed":
+                conn.execute(
+                    "UPDATE email_metadata SET processing_status = '已浏览', updated_at = ? WHERE internal_id = ?",
+                    (now, eid),
+                )
+            elif req.action == "toggle_flag":
+                conn.execute(
+                    "UPDATE email_metadata SET is_flagged = 1 - is_flagged, web_action_at = ? WHERE internal_id = ?",
+                    (now, eid),
+                )
+            elif req.action == "toggle_read":
+                conn.execute(
+                    "UPDATE email_metadata SET is_read = 1 - is_read, web_action_at = ? WHERE internal_id = ?",
+                    (now, eid),
+                )
+
+        if req.action == "mark_done":
+            await redis_service.push_event({
+                "type": "completed",
+                "internal_id": eid,
+                "page_id": page_id,
+                "source": "web",
+                "properties": {"message_id": message_id, "mailbox": mailbox},
+            })
+        elif req.action == "toggle_flag":
+            await redis_service.push_event({
+                "type": "flag_changed",
+                "internal_id": eid,
+                "page_id": page_id,
+                "source": "web",
+                "properties": {
+                    "message_id": message_id,
+                    "mailbox": mailbox,
+                    "is_flagged": not meta.get("is_flagged", False),
+                },
+            })
+        elif req.action == "toggle_read":
+            await redis_service.push_event({
+                "type": "flag_changed",
+                "internal_id": eid,
+                "page_id": page_id,
+                "source": "web",
+                "properties": {
+                    "message_id": message_id,
+                    "mailbox": mailbox,
+                    "is_read": not meta.get("is_read", False),
+                },
+            })
+
+        results.append(eid)
+
+    return {"ok": True, "action": req.action, "processed": results}
+
+
+@router.post("/emails/view-action")
+async def perform_view_action(req: ViewActionRequest):
+    """对整个视图的所有邮件执行操作（如：browse 视图全部已阅）。"""
+    allowed = {"mark_browsed": ["browse"], "mark_done": ["pending"]}
+    if req.action not in allowed:
+        raise HTTPException(status_code=400, detail=f"视图操作不支持: {req.action}")
+    if req.view not in allowed[req.action]:
+        raise HTTPException(status_code=400, detail=f"{req.action} 不能用于 {req.view} 视图")
+
+    # 复用 list_emails 拉全量（page_size 大到覆盖全部）
+    items, total = email_service.list_emails(
+        EmailFilter(view=req.view), page=1, page_size=5000,
+    )
+    if not items:
+        return {"ok": True, "action": req.action, "count": 0}
+
+    now = time.time()
+    with get_db_rw() as conn:
+        ids = [item.internal_id for item in items]
+        placeholders = ",".join("?" * len(ids))
+
+        if req.action == "mark_browsed":
+            conn.execute(
+                f"UPDATE email_metadata SET processing_status = '已浏览', updated_at = ? WHERE internal_id IN ({placeholders})",
+                [now] + ids,
+            )
+        elif req.action == "mark_done":
+            conn.execute(
+                f"UPDATE email_metadata SET is_flagged = 0, is_read = 1, processing_status = '已完成', web_action_at = ?, updated_at = ? WHERE internal_id IN ({placeholders})",
+                [now, now] + ids,
+            )
+
+    # mark_done 需要逐个推 Redis 事件（Mail.app 同步）
+    if req.action == "mark_done":
+        for eid in ids:
+            meta = _get_email_meta(eid)
+            if meta:
+                await redis_service.push_event({
+                    "type": "completed",
+                    "internal_id": eid,
+                    "page_id": meta.get("notion_page_id", ""),
+                    "source": "web",
+                    "properties": {
+                        "message_id": meta.get("message_id", ""),
+                        "mailbox": meta.get("mailbox", ""),
+                    },
+                })
+
+    return {"ok": True, "action": req.action, "count": len(ids)}

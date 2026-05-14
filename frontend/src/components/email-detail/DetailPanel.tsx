@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useEmailDetail } from "@/hooks/useEmailDetail";
 import { useEmailBody } from "@/hooks/useEmailBody";
+import { useThreadEmails } from "@/hooks/useThreadEmails";
 import { MetadataHeader } from "./MetadataHeader";
 import { AIFieldsCard } from "./AIFieldsCard";
 import { ActionBar } from "./ActionBar";
@@ -20,15 +21,32 @@ export function DetailPanel({ emailId, view }: Props) {
   const queryClient = useQueryClient();
   const [headerCollapsed, setHeaderCollapsed] = useState(false);
 
+  const isThread = !!email?.thread_id && email.thread_count > 1;
+  const { data: threadEmails } = useThreadEmails(
+    email?.thread_id ?? null,
+    isThread,
+  );
+
   async function handleAction(action: string) {
     try {
-      await apiFetch(`/emails/${emailId}/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
+      // 线程邮件：批量操作整个线程
+      if (isThread && threadEmails && threadEmails.length > 1) {
+        const ids = threadEmails.map((e) => e.internal_id);
+        await apiFetch("/emails/batch-action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, email_ids: ids }),
+        });
+      } else {
+        await apiFetch(`/emails/${emailId}/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+      }
       queryClient.invalidateQueries({ queryKey: ["emails"] });
-      queryClient.invalidateQueries({ queryKey: ["email", emailId] });
+      queryClient.invalidateQueries({ queryKey: ["email-detail", emailId] });
+      queryClient.invalidateQueries({ queryKey: ["view-counts"] });
     } catch {
       // TODO: toast
     }
@@ -78,6 +96,7 @@ export function DetailPanel({ emailId, view }: Props) {
           isRead={email.is_read}
           isDone={!email.is_flagged && email.llm_status === "success"}
           view={view}
+          threadCount={isThread ? email.thread_count : undefined}
           onAction={handleAction}
         />
       </div>

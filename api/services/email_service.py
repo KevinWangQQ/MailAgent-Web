@@ -71,7 +71,7 @@ def _apply_view_conditions(
     conditions: List[str],
     params: List[Any],
 ) -> Optional[str]:
-    """根据 view 参数追加 SQL 条件，返回 labels 后过滤的视图名（browse/ignore 需后过滤）。"""
+    """根据 view 参数追加 SQL 条件，返回 labels 后过滤的视图名（browse 需后过滤）。"""
     if view == "pending":
         conditions.append("em.is_flagged = 1")
         conditions.append("lp.status = 'success'")
@@ -82,10 +82,6 @@ def _apply_view_conditions(
         conditions.append("lp.status = 'success'")
         conditions.append("COALESCE(em.processing_status, '') NOT IN ('已浏览', '已完成')")
         return "browse"  # 需后过滤：action_type=仅供参考 + priority 非 ⚪低
-    if view == "ignore":
-        conditions.append("em.is_flagged = 0")
-        conditions.append("lp.status = 'success'")
-        return "ignore"  # 需后过滤：priority=⚪低
     # view=all 或 None
     return None
 
@@ -98,8 +94,6 @@ def _post_filter_by_view(item: EmailListItem, view_post: Optional[str]) -> bool:
             and item.priority is not None
             and item.priority != _VIEW_BROWSE_EXCLUDE_PRIORITY
         )
-    if view_post == "ignore":
-        return item.priority == _VIEW_BROWSE_EXCLUDE_PRIORITY
     return True
 
 
@@ -205,7 +199,7 @@ def list_emails(
         tc = thread_counts.get(tid, 0) if tid else 0
         item = _row_to_list_item(row_dict, labels, thread_count=tc)
 
-        # view 后过滤（browse/ignore 依赖 labels_json 内字段）
+        # view 后过滤（browse 依赖 labels_json 内字段）
         if not _post_filter_by_view(item, view_post):
             continue
         # 叠加筛选（快捷标签过滤）
@@ -245,7 +239,6 @@ def get_view_counts() -> Dict[str, int]:
 
     pending = 0
     browse = 0
-    ignore = 0
     total = len(rows)
 
     for row in rows:
@@ -259,13 +252,11 @@ def get_view_counts() -> Dict[str, int]:
         if flagged and llm_ok and proc_status != "已完成":
             pending += 1
         elif not flagged and llm_ok:
-            if priority == _VIEW_BROWSE_EXCLUDE_PRIORITY:
-                ignore += 1
-            elif action_type == "仅供参考" and priority is not None:
+            if action_type == "仅供参考" and priority is not None and priority != _VIEW_BROWSE_EXCLUDE_PRIORITY:
                 if proc_status not in ("已浏览", "已完成"):
                     browse += 1
 
-    return {"pending": pending, "browse": browse, "ignore": ignore, "all": total}
+    return {"pending": pending, "browse": browse, "all": total}
 
 
 def get_email_detail(internal_id: int) -> Optional[EmailDetail]:
