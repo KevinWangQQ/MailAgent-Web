@@ -212,6 +212,46 @@ async def agent_chat(req: ChatRequest):
     )
 
 
+@router.get("/agent/session/{session_id}/history")
+async def get_session_history(session_id: str):
+    """恢复会话历史消息（重启后前端用）。"""
+    sess = session_manager.get_or_create(session_id)
+    if not sess.messages:
+        return {"session_id": session_id, "messages": []}
+
+    # 把内部 messages 格式转成前端可用的简化格式
+    result: list[dict] = []
+    for msg in sess.messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        if role == "user":
+            # tool_result 消息也是 role=user，跳过
+            if isinstance(content, list):
+                continue
+            result.append({"role": "user", "content": content})
+
+        elif role == "assistant":
+            text = ""
+            tool_calls = []
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text += block.get("text", "")
+                        elif block.get("type") == "tool_use":
+                            tool_calls.append({
+                                "tool": block.get("name", ""),
+                                "toolUseId": block.get("id", ""),
+                                "pending": False,
+                            })
+            result.append({"role": "assistant", "content": text, "toolCalls": tool_calls})
+
+    return {"session_id": session_id, "messages": result}
+
+
 @router.delete("/agent/session/{session_id}")
 async def delete_session(session_id: str):
     """清除指定会话。"""

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import type { EmailFilter, EmailListItem, EmailView } from "@/lib/types";
 import { useEmails } from "@/hooks/useEmails";
 import { useEmailBody } from "@/hooks/useEmailBody";
@@ -13,6 +13,10 @@ import { HelpPanel } from "@/components/layout/HelpPanel";
 import { useSearchParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
+
+/* ── 三列可拖拽布局常量 ── */
+const COL_MIN = { list: 280, detail: 300, ai: 260 };
+const COL_DEFAULT_PCT = { list: 0.25, detail: 0.45, ai: 0.30 };
 
 export interface ThreadGroup {
   representative: EmailListItem;
@@ -50,6 +54,44 @@ function buildGroups(emails: EmailListItem[]): ThreadGroup[] {
   return result;
 }
 
+/** 拖拽分隔条 */
+function DragHandle({ onDrag, side }: { onDrag: (dx: number) => void; side: "left" | "right" }) {
+  const dragging = useRef(false);
+  const lastX = useRef(0);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    lastX.current = e.clientX;
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current) return;
+      const dx = ev.clientX - lastX.current;
+      lastX.current = ev.clientX;
+      onDrag(dx);
+    };
+    const onUp = () => {
+      dragging.current = false;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [onDrag]);
+
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      className={`w-1 flex-shrink-0 cursor-col-resize group relative hover:bg-accent/30 active:bg-accent/50 transition-colors ${side === "left" ? "border-r border-border" : "border-l border-border"}`}
+    >
+      <div className="absolute inset-y-0 -left-1 -right-1" />
+    </div>
+  );
+}
+
 export default function InboxPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialId = searchParams.get("id");
@@ -64,7 +106,46 @@ export default function InboxPage() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [aiOpen, setAiOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(true);
+
+  /* ── 三列宽度状态 ── */
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [colWidths, setColWidths] = useState<{ list: number; detail: number; ai: number } | null>(null);
+
+  // 初始化 & 窗口 resize 时按比例重算
+  useEffect(() => {
+    function calc() {
+      const w = containerRef.current?.offsetWidth;
+      if (!w) return;
+      const list = Math.max(COL_MIN.list, Math.round(w * COL_DEFAULT_PCT.list));
+      const ai = aiOpen ? Math.max(COL_MIN.ai, Math.round(w * COL_DEFAULT_PCT.ai)) : 0;
+      const detail = Math.max(COL_MIN.detail, w - list - ai - (aiOpen ? 2 : 1)); // 减去 handle 宽度
+      setColWidths({ list, detail, ai });
+    }
+    calc();
+    window.addEventListener("resize", calc);
+    return () => window.removeEventListener("resize", calc);
+  }, [aiOpen]);
+
+  const handleDragLeft = useCallback((dx: number) => {
+    setColWidths((prev) => {
+      if (!prev) return prev;
+      const newList = Math.max(COL_MIN.list, prev.list + dx);
+      const newDetail = prev.detail - (newList - prev.list);
+      if (newDetail < COL_MIN.detail) return prev;
+      return { ...prev, list: newList, detail: newDetail };
+    });
+  }, []);
+
+  const handleDragRight = useCallback((dx: number) => {
+    setColWidths((prev) => {
+      if (!prev) return prev;
+      const newDetail = prev.detail + dx;
+      const newAi = prev.ai - dx;
+      if (newDetail < COL_MIN.detail || newAi < COL_MIN.ai) return prev;
+      return { ...prev, detail: newDetail, ai: newAi };
+    });
+  }, []);
 
   const queryClient = useQueryClient();
   const { data, isLoading } = useEmails(filter, page, 50);
@@ -160,24 +241,6 @@ export default function InboxPage() {
     setSelectMode(false);
   }, [selectedIds, groups, queryClient]);
 
-  const handleViewAction = useCallback(async (action: string, view: string) => {
-    const count = viewCounts?.[view as keyof typeof viewCounts] ?? 0;
-    if (count === 0) return;
-    if (!confirm(`确定对"${view === "browse" ? "值得浏览" : "待处理"}"视图的 ${count} 封邮件执行此操作？`)) return;
-
-    try {
-      await apiFetch("/emails/view-action", {
-        method: "POST",
-        body: JSON.stringify({ action, view }),
-      });
-      setActiveId(null);
-      queryClient.invalidateQueries({ queryKey: ["emails"] });
-      queryClient.invalidateQueries({ queryKey: ["view-counts"] });
-    } catch {
-      // silent
-    }
-  }, [viewCounts, queryClient]);
-
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -240,16 +303,18 @@ export default function InboxPage() {
   }, [setSearchParams]);
 
   return (
-    <div className="flex-1 flex overflow-hidden relative">
+    <div ref={containerRef} className="flex-1 flex overflow-hidden relative">
       {/* 左侧列表 */}
-      <div className="w-[380px] flex flex-col border-r border-border flex-shrink-0">
+      <div
+        className="flex flex-col flex-shrink-0"
+        style={{ width: colWidths?.list ?? 380 }}
+      >
         <FilterBar
           filter={filter}
           onFilterChange={handleFilterChange}
           viewCounts={viewCounts}
           searchOpen={searchOpen}
           onSearchToggle={setSearchOpen}
-          onViewAction={handleViewAction}
         />
 
         {/* 批量操作栏 */}
@@ -320,17 +385,25 @@ export default function InboxPage() {
         )}
       </div>
 
+      {/* 左分隔条 */}
+      <DragHandle onDrag={handleDragLeft} side="left" />
+
       {/* 中间详情 */}
-      {activeId ? (
-        <DetailPanel emailId={activeId} view={activeView} />
-      ) : (
-        <div className="flex-1 flex flex-col items-center justify-center text-fg-faint text-sm gap-1">
-          <span>选择一封邮件查看详情</span>
-          <span className="text-[11px] text-fg-faint">
-            快捷键: J/K 导航, E {activeView === "browse" ? "已阅" : "完成"}, S 旗标, I 打开AI, ? 帮助
-          </span>
-        </div>
-      )}
+      <div
+        className="flex flex-col min-w-0"
+        style={{ width: colWidths?.detail ?? "auto", flexGrow: colWidths ? 0 : 1 }}
+      >
+        {activeId ? (
+          <DetailPanel emailId={activeId} view={activeView} />
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center text-fg-faint text-sm gap-1">
+            <span>选择一封邮件查看详情</span>
+            <span className="text-[11px] text-fg-faint">
+              快捷键: J/K 导航, E {activeView === "browse" ? "已阅" : "完成"}, S 旗标, I 打开AI, ? 帮助
+            </span>
+          </div>
+        )}
+      </div>
 
       {/* AI 侧边栏切换按钮（收起状态） */}
       {!aiOpen && (
@@ -343,9 +416,15 @@ export default function InboxPage() {
         </button>
       )}
 
+      {/* 右分隔条 */}
+      {aiOpen && <DragHandle onDrag={handleDragRight} side="right" />}
+
       {/* AI 右侧边栏 */}
       {aiOpen && (
-        <div className="w-[360px] flex-shrink-0 border-l border-border">
+        <div
+          className="flex-shrink-0"
+          style={{ width: colWidths?.ai ?? 360 }}
+        >
           <AgentPanel
             emailId={activeId}
             body={bodyData?.body ?? null}
