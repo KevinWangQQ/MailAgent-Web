@@ -1,0 +1,16 @@
+# CODEOWNERS — 默认 review 路由
+# 详见 https://docs.github.com/en/repositories/managing-your-repositories-settings-and-customizations/customizing-your-repository/about-code-owners
+
+# 全局兜底
+*                   @KevinWangQQ
+
+# 前端 → rr
+/frontend/          @rainachan @KevinWangQQ
+
+# API / 分类 / LLM → Jarvis
+/api/               @ChenyqThu @KevinWangQQ
+
+# 协作配置 → owner only
+/CONTRIBUTING.md    @KevinWangQQ
+/CODEOWNERS         @KevinWangQQ
+/.github/           @KevinWangQQ
