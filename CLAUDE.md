@@ -20,6 +20,7 @@
 - `sync_store.db` **只读连接**（`get_db()` 走 `mode=ro`），写操作走 `get_db_rw()` 仅限 `email_metadata.processing_status / is_flagged / is_read / web_action_at` 几个字段
 - 真正影响 Mail.app 的写动作（mark_done / toggle_flag）通过 Redis 推 event 给主进程的 handler 执行
 - LLM 邮件**分类**逻辑（priority / action_type / confidence 等）属主仓 `src/llm_agent/`，本仓只**读取** `llm_processing.labels_json`
+- `ensure_web_columns()` 在启动时 idempotent `ALTER TABLE` 给 `email_metadata` 加 `processing_status` / `web_action_at` 列——web 独立部署、主仓未跑迁移时的兜底。主仓和本仓**都假设这两列存在**，重构时别打破这个隐式契约
 
 ## 命令速查
 
@@ -41,6 +42,8 @@ pm2 start "uvicorn api.main:app --host 0.0.0.0 --port 8200" --name mail-web --in
 # 日志
 pm2 logs mail-web --lines 30 --nostream
 ```
+
+**测试栈尚未配置**：仓里没有 `pytest.ini` / `vitest` / `playwright`。`CONTRIBUTING.md` 自检清单提到 `pytest` 是预期；跑测试前需要先把框架装上，不要假设有现成入口。
 
 ## 架构
 
@@ -183,6 +186,7 @@ tools/
 - **Notion 正文延迟**：第一次拉时可能 2-5s，前端会显示「加载中」。已加 `react-query` 缓存
 - **窄屏布局**：`InboxPage` 在 <1000px 自动收起 AI 边栏；detail 列 `flex-1` 不会被挤出屏幕
 - **Token 注入**：`WEB_API_TOKEN=""`（空）表示开发模式免认证；上线必须填
+- **新加路由必须挂 `verify_token`**：用 `APIRouter(dependencies=[Depends(verify_token)])` 在 router 级别挂最稳。PR #3 曾因 `batch-action` / `view-action` 漏挂被修，SSE 端点也容易忘
 - **SSE 重连**：`useSSE` 3s 后自动重连，不要在前端自己加 polling 兜底
 
 ## 重构亮点（近期）
