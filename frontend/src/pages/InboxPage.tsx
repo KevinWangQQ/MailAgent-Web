@@ -15,8 +15,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 
 /* ── 三列可拖拽布局常量 ── */
-const COL_MIN = { list: 280, detail: 300, ai: 260 };
-const COL_DEFAULT_PCT = { list: 0.25, detail: 0.45, ai: 0.30 };
+const COL_MIN = { list: 240, detail: 280, ai: 240 };
+const COL_DEFAULT_PCT = { list: 0.25, ai: 0.3 };
+/* 视口过窄时（如 F12 占用空间），自动收 AI 边栏 */
+const AI_AUTO_HIDE_BELOW = 1000;
 
 export interface ThreadGroup {
   representative: EmailListItem;
@@ -108,44 +110,86 @@ export default function InboxPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [aiOpen, setAiOpen] = useState(true);
 
-  /* ── 三列宽度状态 ── */
+  /* ── 两列固定宽度（list / ai），detail 弹性撑满 ── */
   const containerRef = useRef<HTMLDivElement>(null);
-  const [colWidths, setColWidths] = useState<{ list: number; detail: number; ai: number } | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [colWidths, setColWidths] = useState<{ list: number; ai: number } | null>(null);
 
-  // 初始化 & 窗口 resize 时按比例重算
+  // 用 ResizeObserver 观察容器尺寸变化（F12 docked 时 window resize 不一定触发）
   useEffect(() => {
-    function calc() {
-      const w = containerRef.current?.offsetWidth;
-      if (!w) return;
-      const list = Math.max(COL_MIN.list, Math.round(w * COL_DEFAULT_PCT.list));
-      const ai = aiOpen ? Math.max(COL_MIN.ai, Math.round(w * COL_DEFAULT_PCT.ai)) : 0;
-      const detail = Math.max(COL_MIN.detail, w - list - ai - (aiOpen ? 2 : 1)); // 减去 handle 宽度
-      setColWidths({ list, detail, ai });
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      if (w > 0) setContainerWidth(w);
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  // 首次拿到 containerWidth 时初始化宽度；之后由用户拖拽决定
+  useEffect(() => {
+    if (containerWidth <= 0 || colWidths) return;
+    const list = Math.max(COL_MIN.list, Math.round(containerWidth * COL_DEFAULT_PCT.list));
+    const ai = Math.max(COL_MIN.ai, Math.round(containerWidth * COL_DEFAULT_PCT.ai));
+    setColWidths({ list, ai });
+  }, [containerWidth, colWidths]);
+
+  // 视口窄时自动收起 AI
+  useEffect(() => {
+    if (containerWidth > 0 && containerWidth < AI_AUTO_HIDE_BELOW && aiOpen) {
+      setAiOpen(false);
     }
-    calc();
-    window.addEventListener("resize", calc);
-    return () => window.removeEventListener("resize", calc);
-  }, [aiOpen]);
+  }, [containerWidth, aiOpen]);
+
+  // 容器收窄到放不下 list+ai+detail_min 时，按比例压缩
+  useEffect(() => {
+    if (!colWidths || containerWidth <= 0) return;
+    const aiW = aiOpen ? colWidths.ai : 0;
+    const handles = aiOpen ? 2 : 1;
+    const used = colWidths.list + aiW + handles + COL_MIN.detail;
+    if (used <= containerWidth) return;
+    // 把多余部分按比例从 list / ai 里扣
+    const overflow = used - containerWidth;
+    const totalShrinkable =
+      Math.max(0, colWidths.list - COL_MIN.list) +
+      Math.max(0, aiW - COL_MIN.ai);
+    if (totalShrinkable <= 0) return;
+    const listShrink = Math.round(
+      overflow * (Math.max(0, colWidths.list - COL_MIN.list) / totalShrinkable),
+    );
+    const aiShrink = overflow - listShrink;
+    setColWidths({
+      list: Math.max(COL_MIN.list, colWidths.list - listShrink),
+      ai: Math.max(COL_MIN.ai, colWidths.ai - aiShrink),
+    });
+  }, [containerWidth, aiOpen, colWidths]);
 
   const handleDragLeft = useCallback((dx: number) => {
     setColWidths((prev) => {
       if (!prev) return prev;
       const newList = Math.max(COL_MIN.list, prev.list + dx);
-      const newDetail = prev.detail - (newList - prev.list);
-      if (newDetail < COL_MIN.detail) return prev;
-      return { ...prev, list: newList, detail: newDetail };
+      // 边界：不能让 detail 小于 COL_MIN.detail
+      const aiW = aiOpen ? prev.ai : 0;
+      const handles = aiOpen ? 2 : 1;
+      if (containerWidth > 0 && newList + aiW + handles + COL_MIN.detail > containerWidth) {
+        return prev;
+      }
+      return { ...prev, list: newList };
     });
-  }, []);
+  }, [aiOpen, containerWidth]);
 
   const handleDragRight = useCallback((dx: number) => {
     setColWidths((prev) => {
       if (!prev) return prev;
-      const newDetail = prev.detail + dx;
-      const newAi = prev.ai - dx;
-      if (newDetail < COL_MIN.detail || newAi < COL_MIN.ai) return prev;
-      return { ...prev, detail: newDetail, ai: newAi };
+      // 拖右把柄：右移 = AI 变小（dx 正方向是右）
+      const newAi = Math.max(COL_MIN.ai, prev.ai - dx);
+      if (containerWidth > 0 && prev.list + newAi + 2 + COL_MIN.detail > containerWidth) {
+        return prev;
+      }
+      return { ...prev, ai: newAi };
     });
-  }, []);
+  }, [containerWidth]);
 
   const queryClient = useQueryClient();
   const { data, isLoading } = useEmails(filter, page, 50);
@@ -388,11 +432,8 @@ export default function InboxPage() {
       {/* 左分隔条 */}
       <DragHandle onDrag={handleDragLeft} side="left" />
 
-      {/* 中间详情 */}
-      <div
-        className="flex flex-col min-w-0"
-        style={{ width: colWidths?.detail ?? "auto", flexGrow: colWidths ? 0 : 1 }}
-      >
+      {/* 中间详情 — 弹性撑满剩余空间 */}
+      <div className="flex flex-col flex-1 min-w-0">
         {activeId ? (
           <DetailPanel emailId={activeId} view={activeView} />
         ) : (

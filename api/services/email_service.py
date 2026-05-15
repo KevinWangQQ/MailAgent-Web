@@ -2,29 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from api.models.email import EmailDetail, EmailFilter, EmailListItem
 from api.services.db import get_db
-
-# Priority 排序映射
-_PRIORITY_ORDER = {
-    "🔴 紧急": 1,
-    "🟡 重要": 2,
-    "🟢 一般": 3,
-    "⚪ 低": 4,
-}
-
-
-def _parse_labels(labels_json: Optional[str]) -> Dict[str, Any]:
-    """安全解析 llm_processing.labels_json。"""
-    if not labels_json:
-        return {}
-    try:
-        return json.loads(labels_json)
-    except (json.JSONDecodeError, TypeError):
-        return {}
+from api.services.email_queries import (
+    EMAIL_BASE_SELECT,
+    build_search_conditions,
+    parse_labels,
+)
 
 
 def _row_to_list_item(
@@ -120,50 +106,34 @@ def list_emails(
         conditions.append("em.is_flagged = ?")
         params.append(int(filter.is_flagged))
     if filter.search:
-        conditions.append("(em.subject LIKE ? OR em.sender LIKE ? OR em.sender_name LIKE ?)")
-        q = f"%{filter.search}%"
-        params.extend([q, q, q])
+        cond, search_params = build_search_conditions(filter.search, use_labels=False)
+        conditions.append(cond)
+        params.extend(search_params)
 
     where = " AND ".join(conditions)
-    join_clause = "LEFT JOIN llm_processing lp ON em.internal_id = lp.internal_id"
-
     needs_post_filter = view_post is not None or filter.priority or filter.action_type or filter.category
 
     with get_db() as conn:
         if needs_post_filter:
             # 后过滤视图：拉全量 SQL 结果，内存过滤+分页（数据量小，~200 条）
-            list_sql = f"""
-                SELECT em.*,
-                       lp.status as llm_status,
-                       lp.labels_json
-                FROM email_metadata em
-                {join_clause}
-                WHERE {where}
-                ORDER BY em.internal_id DESC
-            """
-            rows = conn.execute(list_sql, params).fetchall()
+            rows = conn.execute(
+                f"{EMAIL_BASE_SELECT} WHERE {where} ORDER BY em.internal_id DESC",
+                params,
+            ).fetchall()
         else:
-            # 无后过滤：SQL 分页
-            count_sql = f"""
-                SELECT COUNT(*) as cnt
-                FROM email_metadata em
-                {join_clause}
-                WHERE {where}
-            """
+            count_sql = (
+                f"SELECT COUNT(*) as cnt FROM email_metadata em "
+                f"LEFT JOIN llm_processing lp ON em.internal_id = lp.internal_id "
+                f"WHERE {where}"
+            )
             sql_total = conn.execute(count_sql, params).fetchone()["cnt"]
 
             offset = (page - 1) * page_size
-            list_sql = f"""
-                SELECT em.*,
-                       lp.status as llm_status,
-                       lp.labels_json
-                FROM email_metadata em
-                {join_clause}
-                WHERE {where}
-                ORDER BY em.internal_id DESC
-                LIMIT ? OFFSET ?
-            """
-            rows = conn.execute(list_sql, params + [page_size, offset]).fetchall()
+            rows = conn.execute(
+                f"{EMAIL_BASE_SELECT} WHERE {where} "
+                f"ORDER BY em.internal_id DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset],
+            ).fetchall()
 
     # 先收集所有行和 thread_ids
     row_dicts = []
@@ -194,7 +164,7 @@ def list_emails(
 
     all_items = []
     for row_dict in row_dicts:
-        labels = _parse_labels(row_dict.pop("labels_json", None))
+        labels = parse_labels(row_dict.pop("labels_json", None))
         tid = row_dict.get("thread_id")
         tc = thread_counts.get(tid, 0) if tid else 0
         item = _row_to_list_item(row_dict, labels, thread_count=tc)
@@ -234,7 +204,7 @@ def get_view_counts() -> Dict[str, int]:
             FROM email_metadata em
             LEFT JOIN llm_processing lp ON em.internal_id = lp.internal_id
             WHERE em.sync_status = 'synced'
-            """
+            """,
         ).fetchall()
 
     pending = 0
@@ -245,7 +215,7 @@ def get_view_counts() -> Dict[str, int]:
         flagged = bool(row["is_flagged"])
         proc_status = row["processing_status"] or ""
         llm_ok = row["llm_status"] == "success"
-        labels = _parse_labels(row["labels_json"])
+        labels = parse_labels(row["labels_json"])
         priority = labels.get("priority")
         action_type = labels.get("action_type")
 
@@ -263,14 +233,7 @@ def get_email_detail(internal_id: int) -> Optional[EmailDetail]:
     """获取单封邮件详情。"""
     with get_db() as conn:
         row = conn.execute(
-            """
-            SELECT em.*,
-                   lp.status as llm_status,
-                   lp.labels_json
-            FROM email_metadata em
-            LEFT JOIN llm_processing lp ON em.internal_id = lp.internal_id
-            WHERE em.internal_id = ?
-            """,
+            f"{EMAIL_BASE_SELECT} WHERE em.internal_id = ?",
             (internal_id,),
         ).fetchone()
 
@@ -278,7 +241,7 @@ def get_email_detail(internal_id: int) -> Optional[EmailDetail]:
             return None
 
         row_dict = dict(row)
-        labels = _parse_labels(row_dict.pop("labels_json", None))
+        labels = parse_labels(row_dict.pop("labels_json", None))
 
         # 线程计数
         thread_id = row_dict.get("thread_id")
@@ -304,16 +267,9 @@ def get_thread_emails(thread_id: str) -> List[EmailListItem]:
 
     with get_db() as conn:
         rows = conn.execute(
-            """
-            SELECT em.*,
-                   lp.status as llm_status,
-                   lp.labels_json
-            FROM email_metadata em
-            LEFT JOIN llm_processing lp ON em.internal_id = lp.internal_id
-            WHERE em.thread_id = ?
-              AND em.sync_status = 'synced'
-            ORDER BY em.date_received ASC
-            """,
+            f"{EMAIL_BASE_SELECT} "
+            "WHERE em.thread_id = ? AND em.sync_status = 'synced' "
+            "ORDER BY em.date_received ASC",
             (thread_id,),
         ).fetchall()
 
@@ -321,7 +277,7 @@ def get_thread_emails(thread_id: str) -> List[EmailListItem]:
     items = []
     for row in rows:
         row_dict = dict(row)
-        labels = _parse_labels(row_dict.pop("labels_json", None))
+        labels = parse_labels(row_dict.pop("labels_json", None))
         items.append(_row_to_list_item(row_dict, labels, thread_count=thread_count))
     return items
 
