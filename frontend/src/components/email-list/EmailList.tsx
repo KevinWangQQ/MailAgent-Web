@@ -25,7 +25,7 @@ export function EmailList({
   onToggleSelect,
 }: Props) {
   const listRef = useRef<HTMLDivElement>(null);
-  const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set());
+  const [expandedThreads, setExpandedThreads] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     if (activeId === null || !listRef.current) return;
