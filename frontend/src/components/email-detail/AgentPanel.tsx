@@ -61,9 +61,39 @@ export function AgentPanel({
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const prevEmailIdRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  /* 输入框可拖拽高度（默认 96px，60-360 范围） */
+  const INPUT_MIN_H = 60;
+  const INPUT_MAX_H = 360;
+  const INPUT_DEFAULT_H = 96;
+  const [inputHeight, setInputHeight] = useState<number>(INPUT_DEFAULT_H);
+  const inputDragRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  const onInputResizeDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    inputDragRef.current = { startY: e.clientY, startH: inputHeight };
+    const onMove = (ev: MouseEvent) => {
+      const drag = inputDragRef.current;
+      if (!drag) return;
+      // 向上拖增大输入框（dy 为负）
+      const next = Math.max(INPUT_MIN_H, Math.min(INPUT_MAX_H, drag.startH + (drag.startY - ev.clientY)));
+      setInputHeight(next);
+    };
+    const onUp = () => {
+      inputDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [inputHeight]);
 
   // session 持久化 key
   const sessionKey = emailId !== null ? `agent_session_${emailId}` : "agent_session_global";
@@ -436,27 +466,34 @@ export function AgentPanel({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* 输入区 */}
-      <div className="flex-shrink-0 px-3 py-2 border-t border-border">
-        <div className="flex gap-2">
-          <input
+      {/* 输入区（顶部拖把柄 + textarea + 发送） */}
+      <div className="flex-shrink-0 border-t border-border">
+        {/* 拖把柄 */}
+        <div
+          onMouseDown={onInputResizeDown}
+          onDoubleClick={() => setInputHeight(INPUT_DEFAULT_H)}
+          className="h-1 cursor-row-resize hover:bg-accent/30 active:bg-accent/50 transition-colors"
+          title="拖动调整输入框高度 · 双击恢复默认"
+        />
+        <div className="px-3 py-2 flex gap-2 items-stretch" style={{ height: inputHeight }}>
+          <textarea
             ref={inputRef}
-            type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+              // Enter 发送；Shift+Enter / 输入法组合中保留默认换行
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 handleSubmit();
               }
             }}
-            placeholder={hasEmail ? "输入指令..." : "搜索或提问..."}
-            className="flex-1 bg-bg-tertiary rounded px-2.5 py-1.5 text-xs text-fg-primary placeholder:text-fg-faint outline-none focus:ring-1 focus:ring-accent/50"
+            placeholder={hasEmail ? "输入指令...（Enter 发送 / Shift+Enter 换行）" : "搜索或提问..."}
+            className="flex-1 bg-bg-tertiary rounded px-2.5 py-1.5 text-xs text-fg-primary placeholder:text-fg-faint outline-none focus:ring-1 focus:ring-accent/50 resize-none leading-relaxed"
           />
           <button
             onClick={handleSubmit}
             disabled={loading || !input.trim()}
-            className="px-3 py-1.5 rounded text-[11px] bg-accent text-white disabled:opacity-40 flex-shrink-0"
+            className="px-3 rounded text-[11px] bg-accent text-white disabled:opacity-40 flex-shrink-0 self-stretch"
           >
             发送
           </button>
