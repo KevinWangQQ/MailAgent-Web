@@ -34,6 +34,62 @@ cd frontend && npm run build
 # 构建产物在 frontend/dist/，由 FastAPI 自动 serve
 ```
 
+## 多 agent 并行开发（git worktree）
+
+本项目由多个 agent（Kevin / 小K / Jarvis / rr）并行迭代，**推荐用 `git worktree` 隔离工作目录**——同一份 `.git`，多个分支各占一个目录互不踩。
+
+### 一次性目录布局
+
+```text
+~/code/
+├── MailAgent-Web/                  # 主目录（main，留给 review/merge）
+├── MailAgent-Web-jarvis-feat-x/    # Jarvis 的 feature 分支
+├── MailAgent-Web-rr-ui-y/          # rr 的 UI 分支
+└── MailAgent-Web-xiaok-feat-z/     # 小K 的 feature 分支
+```
+
+### 常用命令
+
+```bash
+# 在主目录里开新 worktree（自动建分支）
+git worktree add ../MailAgent-Web-xiaok-feat-z -b agent/xiaok/feat-z
+
+# 已有远端分支
+git worktree add ../MailAgent-Web-fix-b origin/fix-b
+
+git worktree list                    # 看所有 worktree
+git worktree remove ../MailAgent-Web-xiaok-feat-z   # 用完清理
+git worktree prune                   # 清理失效引用
+```
+
+### 每个新 worktree 必做
+
+1. **拷 `.env`**（worktree 不自动同步未跟踪文件）：
+   ```bash
+   cp ../MailAgent-Web/.env .
+   ```
+2. **后端依赖**（建议每个 worktree 独立 venv，避免互相污染）：
+   ```bash
+   python -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+3. **前端依赖**：
+   ```bash
+   cd frontend && npm install   # 或用 pnpm + shared store 省盘
+   ```
+4. **端口避让**（两个 worktree 同时跑 dev server 会撞端口）：
+   - 后端：`uvicorn api.main:app --port 8201`（主目录 8200，每个 worktree +1）
+   - 前端：`npm run dev -- --port 5174`（默认 5173）
+
+### 注意
+
+- 同一分支同一时间只能在一个 worktree checkout，重复 `add` 会报错
+- 删 worktree 用 `git worktree remove`，**别直接 `rm -rf`**（会留悬挂引用）
+- `.vscode/` / `.idea/` 也不同步，按需 copy
+- 不熟 worktree 的 agent 推回普通 `git clone` 也行，主项目兼容两种模式
+
+详细 agent 协作规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+
 ## 配置
 
 编辑 `.env`（参考 `.env.example`）：
