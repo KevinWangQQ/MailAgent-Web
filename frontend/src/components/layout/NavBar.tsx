@@ -4,6 +4,7 @@ import { clsx } from "clsx";
 const LINKS = [
   { to: "/", label: "Dashboard" },
   { to: "/inbox", label: "工作台" },
+  { to: "/ops", label: "运维" },
 ] as const;
 
 export function NavBar() {
